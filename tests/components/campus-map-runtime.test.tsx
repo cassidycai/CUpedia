@@ -99,6 +99,8 @@ import type {
   CampusMapPublishSourceInput,
 } from "@/lib/campus-map/publish-contract";
 import { installAmapRuntime } from "../helpers/amap-runtime";
+import providerRelease from "../../docs/campus-map/data/amap-provider-mappings-2026-10-23.json";
+import { parseCampusMapProviderMappingReleaseManifest } from "@/lib/campus-map/provider-mapping-release";
 import { createCampusMapBrowseFixture } from "../helpers/campus-map-browse-projection";
 import {
   createCampusMapSearchDirectoryFixture,
@@ -436,7 +438,13 @@ function mixedWaterProjection() {
 
 function representativeV2Projection({
   includeClassroom = true,
-}: { includeClassroom?: boolean } = {}) {
+  outpatientId = "87900000-0000-4000-8000-000000000003",
+  dentalId = "87900000-0000-4000-8000-000000000004",
+}: {
+  includeClassroom?: boolean;
+  outpatientId?: string;
+  dentalId?: string;
+} = {}) {
   const bmsBuildingId = "367d9f99-13e6-5805-8447-5b523f7b36d3";
   const healthBuildingId = "a8bfebbd-87bf-5ac9-a089-446c4198e38d";
   const publishedAt = new Date("2026-09-04T00:00:00.000Z");
@@ -532,7 +540,7 @@ function representativeV2Projection({
       provenance: [{ ...source, hasLocationEvidence: true }],
     },
     {
-      id: "87900000-0000-4000-8000-000000000003",
+      id: outpatientId,
       revisionId: "87910000-0000-4000-8000-000000000003",
       factSchemaVersion: 2,
       name: "门诊（Outpatient Service）",
@@ -565,7 +573,7 @@ function representativeV2Projection({
       provenance: [source],
     },
     {
-      id: "87900000-0000-4000-8000-000000000004",
+      id: dentalId,
       revisionId: "87910000-0000-4000-8000-000000000004",
       factSchemaVersion: 2,
       name: "牙科（Dental Service）",
@@ -875,6 +883,83 @@ describe("CampusMapRuntime", () => {
     expect(search.className).not.toContain("md:text-sm");
   });
 
+  it("keeps a stable search label and returns focus after clearing (#926)", async () => {
+    render(<CampusMapRuntime />);
+    const search = screen.getByRole("textbox", { name: "搜索建筑或地点" });
+    fireEvent.change(search, { target: { value: "科学馆" } });
+    expect(screen.getByRole("textbox", { name: "搜索建筑或地点" })).toBe(
+      search,
+    );
+    const clear = screen.getByRole("button", { name: "清除搜索" });
+    clear.focus();
+    fireEvent.click(clear);
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    expect((search as HTMLInputElement).value).toBe("");
+    expect(
+      document.querySelector("[data-campus-map-results=search]"),
+    ).toBeNull();
+  });
+
+  it("reopens the same query when focusing search from a Building card (#926)", async () => {
+    render(
+      <CampusMapRuntime
+        initialBrowseProjection={createCampusMapSearchDirectoryFixture()}
+      />,
+    );
+    const search = screen.getByPlaceholderText("搜索建筑或地点…");
+    fireEvent.change(search, { target: { value: "YIA" } });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /康本国际学术园.*Yasumoto/ }),
+    );
+    await screen.findByRole("heading", { name: "康本国际学术园" });
+    expect(
+      document.querySelector("[data-campus-map-results=search]"),
+    ).toBeNull();
+    fireEvent.focus(search);
+    expect(
+      await screen.findByRole("button", { name: /康本国际学术园.*Yasumoto/ }),
+    ).not.toBeNull();
+    expect(window.location.search).toContain("scene=search");
+    expect((search as HTMLInputElement).value).toBe("YIA");
+  });
+
+  it("keeps map failure and retry inside searchable results (#926)", async () => {
+    render(<CampusMapRuntime />);
+    const script = await waitFor(() => {
+      const script = document.querySelector<HTMLScriptElement>(
+        "script[data-amap-campus]",
+      );
+      expect(script).not.toBeNull();
+      return script!;
+    });
+    fireEvent.error(script);
+    await screen.findByRole("heading", { name: "地图暂时不可用" });
+    fireEvent.change(screen.getByPlaceholderText("搜索建筑或地点…"), {
+      target: { value: "科学馆" },
+    });
+    const results = document.querySelector<HTMLElement>(
+      "[data-campus-map-results=search]",
+    )!;
+    expect(
+      within(results).getByText("底图暂不可用，仍可查看搜索结果。"),
+    ).not.toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: "地图暂时不可用" }),
+    ).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "设施筛选" })).toBeNull();
+    fireEvent.click(
+      within(results).getByRole("button", { name: "重新加载地图" }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector("script[data-amap-campus]")).not.toBe(
+        script,
+      ),
+    );
+    expect(
+      within(results).getByRole("button", { name: /科学馆/ }),
+    ).not.toBeNull();
+  });
+
   it("uses plain language when search has no results", async () => {
     render(<CampusMapRuntime />);
 
@@ -1005,6 +1090,61 @@ describe("CampusMapRuntime", () => {
     expect(screen.getByRole("link", { name: /查看官方详情/u })).toBeTruthy();
     expect(document.body.textContent).not.toContain("营业中");
   });
+
+  it.each([
+    [
+      "B073C0328Q",
+      "大学保健医疗中心",
+      "门诊（Outpatient Service）",
+      "a1906459-8a4c-4433-a445-e60f6a92c795",
+      "tel:+85239436439",
+    ],
+    [
+      "B0LKXDMIQV",
+      "大学保健处-牙医",
+      "牙科（Dental Service）",
+      "0f7d7cc3-07a9-43a1-93c4-fef56f1ae299",
+      "tel:+85239436412",
+    ],
+  ])(
+    "opens %s directly as its own service using the checked release manifest",
+    async (providerObjectId, label, name, placeId, phone) => {
+      const parsed =
+        parseCampusMapProviderMappingReleaseManifest(providerRelease);
+      if (parsed.status !== "valid")
+        throw new Error("Invalid checked release manifest");
+      const runtime = installAmapRuntime();
+      render(
+        <CampusMapRuntime
+          initialBrowseProjection={representativeV2Projection({
+            outpatientId: "a1906459-8a4c-4433-a445-e60f6a92c795",
+            dentalId: "0f7d7cc3-07a9-43a1-93c4-fef56f1ae299",
+          })}
+          initialAmapHotspotMappings={parsed.manifest.mappings.map(
+            ({ identity, target }) => ({
+              providerObjectId: identity.providerObjectId,
+              target,
+            }),
+          )}
+        />,
+      );
+      await waitFor(() => expect(runtime.maps).toHaveLength(1));
+      await act(async () =>
+        runtime.maps[0]!.emit("hotspotclick", {
+          id: providerObjectId,
+          name: label,
+          lnglat: { lng: 114.215058, lat: 22.416492 },
+        }),
+      );
+      expect(await screen.findByRole("heading", { name })).toBeTruthy();
+      expect(window.location.search).toContain(`scene=place&id=${placeId}`);
+      expect(screen.queryByText("高德地图地点")).toBeNull();
+      expect(screen.queryByRole("heading", { name: "楼内设施" })).toBeNull();
+      expect(
+        screen.getByRole("link", { name: /电话预约/u }).getAttribute("href"),
+      ).toBe(phone);
+    },
+  );
 
   it("lists co-located health services separately and opens booking directly", async () => {
     render(
@@ -1411,7 +1551,7 @@ describe("CampusMapRuntime", () => {
     await waitFor(() =>
       expect(window.location.search).toContain("scene=search"),
     );
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(publishStatus.isConnected).toBe(false);
     expect(
       document.querySelector('[aria-live="polite"]')?.textContent,
     ).not.toContain("正在发布地点资料");
@@ -3644,12 +3784,40 @@ describe("CampusMapRuntime", () => {
     await waitFor(() => expect(document.activeElement).toBe(activeFilter));
   });
 
+  it("makes every category reachable from More, including clipped primary filters", async () => {
+    render(<CampusMapRuntime />);
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    for (const name of [
+      "课室",
+      "公共空间",
+      "饮水点",
+      "洗手间",
+      "体育设施",
+      "医疗服务",
+    ]) {
+      expect(await screen.findByRole("menuitemradio", { name })).not.toBeNull();
+    }
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "洗手间" }));
+    expect(
+      await screen.findByRole("heading", { name: "洗手间" }),
+    ).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    expect(
+      await screen.findByRole("menuitemradio", {
+        name: "洗手间",
+        checked: true,
+      }),
+    ).not.toBeNull();
+  });
+
   it("returns focus to More when dismissing a category discovered there", async () => {
     render(<CampusMapRuntime />);
 
     const moreFilter = screen.getByRole("button", { name: "更多" });
     fireEvent.click(moreFilter);
-    fireEvent.click(await screen.findByRole("menuitem", { name: "医疗服务" }));
+    fireEvent.click(
+      await screen.findByRole("menuitemradio", { name: "医疗服务" }),
+    );
     await screen.findByRole("heading", { name: "医疗服务" });
 
     fireEvent.click(screen.getByRole("button", { name: "关闭医疗服务列表" }));
@@ -3803,7 +3971,9 @@ describe("CampusMapRuntime", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "更多" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "医疗服务" }));
+    fireEvent.click(
+      await screen.findByRole("menuitemradio", { name: "医疗服务" }),
+    );
     expect(
       await screen.findByRole("heading", { name: "医疗服务" }),
     ).toBeTruthy();
@@ -3822,7 +3992,9 @@ describe("CampusMapRuntime", () => {
     expect(restored.closest("[data-campus-map-results]")?.scrollTop).toBe(40);
     await waitFor(() => expect(document.activeElement).toBe(restored));
     fireEvent.click(screen.getByRole("button", { name: "更多" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "体育设施" }));
+    fireEvent.click(
+      await screen.findByRole("menuitemradio", { name: "体育设施" }),
+    );
     expect(
       await screen.findByRole("button", { name: /大学游泳池/ }),
     ).toBeTruthy();
